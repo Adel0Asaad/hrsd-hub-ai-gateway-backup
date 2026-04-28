@@ -1,93 +1,242 @@
 # ai-gateway
 
+The LLM-orchestration service for the HRSD SDP MCP platform. Speaks HTTP (and SSE) to the frontend, OpenAI's Chat Completions API to the model, MCP over streamable-http to the tool server, and REST to sdp-service for per-user context.
 
+For the full architecture see [`../docs/ARCHITECTURE-ai-gateway.md`](../docs/ARCHITECTURE-ai-gateway.md) and [`../docs/ARCHITECTURE-e2e.md`](../docs/ARCHITECTURE-e2e.md).
 
-## Getting started
+## Quick start
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
-
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
-
-## Add your files
-
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/ee/gitlab-basics/add-file.html#add-a-file-using-the-command-line) or push an existing Git repository with the following command:
-
-```
-cd existing_repo
-git remote add origin http://gitlab.devops.hrsd.gov.sa/nama/ai-assistant/ai-gateway.git
-git branch -M main
-git push -uf origin main
+```bash
+npm install
+cp gateway.config.example.json gateway.config.json   # edit to taste
+npm run dev                                           # tsx watch
 ```
 
-## Integrate with your tools
+Defaults bind to `127.0.0.1:3001`. Hit `/healthz` to verify the service is up and all downstream dependencies report healthy.
 
-- [ ] [Set up project integrations](http://gitlab.devops.hrsd.gov.sa/nama/ai-assistant/ai-gateway/-/settings/integrations)
+## Scripts
 
-## Collaborate with your team
+| Script | Purpose |
+|---|---|
+| `npm run dev` | Watch mode via `tsx watch src/server.ts` |
+| `npm run build` | Compile to `dist/` (tsc) |
+| `npm start` | Run compiled build |
+| `npm test` | Full test suite via `node --test` |
+| `npm run test:watch` | Test suite in watch mode |
 
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Set auto-merge](https://docs.gitlab.com/ee/user/project/merge_requests/merge_when_pipeline_succeeds.html)
+The test runner uses Node's built-in `node:test` harness with `tsx` for TypeScript. No Jest, no Vitest — zero extra test framework in the dependency graph.
 
-## Test and Deploy
+## HTTP surface
 
-Use the built-in continuous integration in GitLab.
+| Method | Path | Body / Purpose |
+|---|---|---|
+| `POST` | `/chat` | One-shot turn — JSON in, JSON out |
+| `POST` | `/chat/stream` | Same contract, SSE delta+tool_lifecycle+final |
+| `GET`  | `/healthz` | Liveness + downstream dependency probe |
+| `GET`  | `/metrics` | Prometheus scrape endpoint (see [`../docs/RUNBOOK-observability.md`](../docs/RUNBOOK-observability.md)) |
 
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/index.html)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
+`POST /chat` request body:
 
-***
+```json
+{
+  "message": "show me available assistive devices",
+  "userId": "u-123",
+  "conversationId": "optional-client-generated",
+  "history": [ { "role": "user", "content": "..." } ]
+}
+```
 
-# Editing this README
+Response:
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+```json
+{
+  "conversationId": "...",
+  "text": "Here are the available assistive devices:\n\n```cards\n{\"kind\":\"gallery\",\"items\":[...]}\n```",
+  "history": [ ... ],
+  "toolsUsed": [ { "name": "list_assistive_devices", "durationMs": 142 } ]
+}
+```
 
-## Suggestions for a good README
+Note that the `text` field can include a fenced ` ```cards ` block — see the [cards rendering pipeline](#spec-driven-cards-rendering) section below.
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+## Configuration
 
-## Name
-Choose a self-explaining name for your project.
+Configuration is loaded from `gateway.config.json` and validated with Zod at startup. Fail-fast: the process exits non-zero on any schema violation so a bad config never reaches production.
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+Key blocks:
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+- `server.port`, `server.maxResponseBytes`
+- `llm.provider`, `llm.apiKey`, `llm.model`, `llm.temperature`
+- `mcp.url`, `mcp.connectTimeoutMs`, `mcp.requestTimeoutMs`
+- `mcp.toolRenderOverrides` — operator-side escape hatch for missing render hints (§ [Render hint overrides](#render-hint-overrides))
+- `sdp.baseUrl`, `sdp.timeoutMs`
+- `rateLimits.default`, `rateLimits.perTool`
+- `redis` (optional) — enable to back the KV store with Redis instead of the in-memory default
+- `logging.level`, `logging.redact`
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+See `gateway.config.example.json` for the full shape.
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+## Token-efficient tool feedback via TOON
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+When a tool result is fed back into the next LLM turn, the gateway does not send raw JSON. It runs the structured payload through a **TOON** (Token Oriented Object Notation) serializer that trades JSON's punctuation for YAML-like indentation and CSV-like tabular rows.
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+### Why TOON
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+Every tool call in a multi-turn conversation feeds its output back into the model's context window for the next turn. For a discovery tool that returns 40 rows of `{ code, name, category, …}`, a JSON serialization looks like:
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+```json
+[
+  {"code": "WHEELCHAIR", "name": "كرسي متحرك", "category": "mobility"},
+  {"code": "WALKER",     "name": "مشاية",      "category": "mobility"},
+  ...
+]
+```
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+The **keys repeat on every row**. The LLM pays for every `"code":` and `"name":` and `"category":` on every item, which blows up tokens linearly with list length for zero new information.
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+TOON encodes the same data as a single header row plus compact values:
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+```
+[40]{code,name,category}
+  WHEELCHAIR,كرسي متحرك,mobility
+  WALKER,مشاية,mobility
+  ...
+```
 
-## License
-For open source projects, say how it is licensed.
+Empirically this saves **30-60% of tokens on typical tool-feedback payloads** depending on shape uniformity. That compounds: fewer input tokens on turn N ⇒ more headroom for output on turn N ⇒ shorter responses ⇒ lower latency and lower cost.
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+### When TOON runs
+
+The serializer lives at `src/orchestrator/toon.ts` and exposes two entry points:
+
+- `toolsToToon(tools)` — serializes the tool catalog once per turn for the system/tool section
+- `resultToToon(data)` — serializes a single tool result before it is appended to the conversation as a `{ role: "tool" }` message
+
+The orchestrator calls `resultToToon` at `src/orchestrator/chat.orchestrator.ts` only when the MCP result has `structured` data attached — `result.structured ? resultToToon(result.structured) : result.content`. String-only results pass through untouched.
+
+### Format at a glance
+
+- Primitives → their literal string form (`42`, `true`, `"hello"`, `null`).
+- Uniform arrays of objects → CSV-style with a single column header row.
+- Non-uniform arrays → fall back to a YAML-style list form.
+- Objects → `key: value` with 2-space indentation for nesting.
+
+The fallback paths are important: if the serializer cannot produce a compact uniform form it degrades gracefully instead of silently dropping fields.
+
+### Tests
+
+`tests/toon.test.ts` covers the serializer end-to-end: primitives, empty arrays, uniform arrays (CSV form), non-uniform arrays (list fallback), nested objects, nested arrays, and null-in-object semantics. Run it directly:
+
+```bash
+npm test -- --test-name-pattern="resultToToon"
+```
+
+### When to change it
+
+TOON is an internal format. The only consumer is the LLM through the OpenAI provider. If you want to change the encoding:
+
+1. Update `src/orchestrator/toon.ts`.
+2. Update the tests in `tests/toon.test.ts`.
+3. Verify round-trip rendering by running the cards-render integration tests — they feed structured payloads through the orchestrator and assert the final assistant text, which indirectly validates that the LLM still understood the tool output.
+
+Do **not** send TOON to the frontend or store it anywhere durable. It is purely a wire optimization between the orchestrator and the LLM.
+
+## Spec-driven cards rendering
+
+The gateway does not hardcode any tool name when deciding whether to emit a gallery. Tools advertise a render hint via MCP's `_meta.render` extension; the gateway projects successful tool results into a `CardsBlock` and appends a fenced ` ```cards ` block to the final assistant text. The frontend parses the fence and routes on `block.kind`.
+
+Four possible outcomes per tool invocation, logged as `cards_render_decision.decision`:
+
+| Decision | Meaning | What to do |
+|---|---|---|
+| `tool_error` | MCP call failed | See [`../docs/RUNBOOK-missing-gallery.md`](../docs/RUNBOOK-missing-gallery.md) §4 |
+| `no_hint` | Tool has no render metadata | [`RUNBOOK-missing-gallery.md`](../docs/RUNBOOK-missing-gallery.md) §5 — either add the hint upstream or use a config override |
+| `projection_miss` | Hint present but payload shape didn't match | [`RUNBOOK-missing-gallery.md`](../docs/RUNBOOK-missing-gallery.md) §6 — schema drift, highest-signal failure mode |
+| `emitted` | Gallery block produced | Happy path |
+
+The `projection_miss` enum value is exposed as a Prometheus metric label (`ai_gateway_tool_calls_total{status="projection_miss"}`) and the platform alerts on any non-zero rate.
+
+### Render hint overrides
+
+For zero-deploy recovery when an upstream service is slow to ship a render hint, add a `mcp.toolRenderOverrides` entry to `gateway.config.json`:
+
+```json
+{
+  "mcp": {
+    "toolRenderOverrides": {
+      "list_assistive_devices": {
+        "kind": "gallery",
+        "itemCode": "deviceCode",
+        "itemName": "deviceName"
+      }
+    }
+  }
+}
+```
+
+Restart the gateway. The `mcp_tools_discovered` log line will show `source: "override"` for that tool. **Upstream always wins**: once the upstream service delivers a real hint, the override silently becomes a no-op. Remove overrides during the next maintenance window to keep the config clean.
+
+## Observability
+
+All logs are structured JSON via pino. Every log line carries `traceId` (UUID) which is also returned as the `x-trace-id` response header and propagated downstream as `mcp-trace-id` / `x-trace-id`.
+
+Stable log contracts (ops tooling may safely key on these):
+
+- `chat_request_received` — one per `/chat` turn
+- `mcp_tools_discovered` — one per gateway-to-MCP session; shows render hint provenance
+- `cards_render_decision` — one per tool invocation; the single highest-signal line
+- `tool_call_succeeded` / `tool_call_failed` — per MCP call with timing
+- `circuit_breaker_state` — state transitions of LLM / MCP breakers
+- `chat_completed` — end of a successful turn
+
+Prometheus metrics at `GET /metrics`:
+
+- `ai_gateway_llm_requests_total{status}`
+- `ai_gateway_tool_calls_total{tool,status}` — `status` includes `projection_miss`
+- `ai_gateway_request_duration_seconds{route}`
+- `ai_gateway_circuit_breaker_state{client}`
+- `ai_gateway_rate_limit_denied_total{scope}`
+
+See [`../docs/RUNBOOK-observability.md`](../docs/RUNBOOK-observability.md) for the full SLO treatment, alert rules, and dashboard recommendations.
+
+## Testing
+
+Tests live in `tests/` next to the service. The layout mirrors `src/` for navigation but is flat at the top level:
+
+| File | What it covers |
+|---|---|
+| `chat-orchestrator.test.ts` | Core orchestrator tool-loop logic |
+| `chat-routes.test.ts` | HTTP route layer against a stubbed orchestrator |
+| `cards-render.test.ts` | Projection + render-index + metadata-driven integration |
+| `smoke-cards-e2e.test.ts` | Full-path smoke: real Express + real orchestrator + fakes for LLM/MCP/SDP, asserts ` ```cards ` fences appear in POST responses |
+| `error-handler.test.ts` | Error envelope shape and mapping |
+| `openai-provider-mapping.test.ts` | Request/response translation against OpenAI SDK seams |
+| `rate-limiter.test.ts` | Token-bucket semantics across KV backends |
+| `sdp-client.test.ts` | HTTP client against sdp-service with retries and redaction |
+| `toon.test.ts` | TOON serializer: primitives, arrays (CSV + fallback), objects |
+
+Test doubles live in `tests/helpers/fakes.ts`:
+
+- `FakeLlmProvider` replays a scripted sequence of responses
+- `FakeMcpClient` serves a tool catalog and custom result handler
+- `FakeChatContextFetcher` returns canned sdp-service bundles
+
+All tests use Node's built-in `node:test` — no external framework. Run a single file with:
+
+```bash
+node --import tsx --test tests/smoke-cards-e2e.test.ts
+```
+
+## Deploy
+
+`Dockerfile` builds a multi-stage production image. The service is stateless (Redis is optional state); deploy as N replicas behind a load balancer and wire `/healthz` into the LB health check so a bad instance is drained automatically.
+
+Graceful shutdown on `SIGTERM`/`SIGINT`: stop accepting new connections, drain in-flight requests (bounded by `server.shutdownTimeoutMs`), close MCP and Redis clients, then exit.
+
+## Related documents
+
+- [`../docs/ARCHITECTURE-ai-gateway.md`](../docs/ARCHITECTURE-ai-gateway.md) — per-service architecture
+- [`../docs/ARCHITECTURE-e2e.md`](../docs/ARCHITECTURE-e2e.md) — end-to-end platform
+- [`../docs/RUNBOOK-missing-gallery.md`](../docs/RUNBOOK-missing-gallery.md) — troubleshooting the gallery pipeline
+- [`../docs/RUNBOOK-observability.md`](../docs/RUNBOOK-observability.md) — log contracts, metrics, SLOs
+- [`../docs/ASSESSMENT-2026-04-19.md`](../docs/ASSESSMENT-2026-04-19.md) — daily assessment notes

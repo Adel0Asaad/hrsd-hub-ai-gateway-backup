@@ -1,0 +1,7 @@
+node_modules
+dist
+*.log
+
+# Config with real secrets — use gateway.config.example.json as template
+.env
+package-lock.json

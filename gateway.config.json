@@ -1,0 +1,95 @@
+{
+  "llm": {
+    "provider": "oci",
+    "providers": {
+      "openai": {
+        "apiKey": "${OPENAI_API_KEY}",
+        "model": "gpt-4.1"
+      },
+      "ollama": {
+        "apiKey": "ollama",
+        "model": "Qwen3:1.7b",
+        "baseURL": "http://localhost:11434/v1"
+      },
+      "gemini": {
+        "apiKey": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash"
+      },
+      "claude": {
+        "apiKey": "${ANTHROPIC_API_KEY}",
+        "model": "claude-sonnet-4-20250514"
+      },
+      "oci": {
+        "auth": {
+          "url": "https://apis.apps.ocp-preprod.hrsd.gov.sa/hrsd-dev/internal-services/v1/oauth",
+          "username": "52d7e7180e3ceb2e70ec005f36a9af12",
+          "password": "01f752231116a97fe65728fbc96ad0ea",
+          "grantType": "client_credentials",
+          "rejectUnauthorized": false
+        },
+        "chat": {
+          "url": "https://apis.apps.ocp-preprod.hrsd.gov.sa/hrsd-dev/internal-services/v1/chat/completions",
+          "compartmentId": "ocid1.compartment.oc1..aaaaaaaatpomtbq6pmgtcwkkqcy26riaryfd6t2xqbrsxzjas3q6eatnaebq",
+          "servingType": "DEDICATED",
+          "endpointId": "ocid1.generativeaiendpoint.oc1.me-riyadh-1.amaaaaaazwnzubqakxuunq46cppei25dd5ghogdpcozeqtsogdgosijkevra",
+          "apiFormat": "COHERE"
+        }
+      }
+    },
+    "timeoutMs": 60000,
+    "maxRetries": 1
+  },
+  "mcp": {
+    "serverUrl": "http://127.0.0.1:3001/mcp",
+    "timeoutMs": 5000,
+    "toolRenderOverrides": {
+      "list_assistive_devices": {
+        "kind": "gallery",
+        "itemCode": "deviceCode",
+        "itemName": "deviceName"
+      }
+    }
+  },
+  "sdpService": {
+    "baseUrl": "http://127.0.0.1:8080"
+  },
+  "server": {
+    "port": 3002,
+    "logLevel": "debug",
+    "requestTimeoutMs": 90000,
+    "allowedOrigins": [
+      "http://localhost:8080",
+      "http://localhost:5173",
+      "http://localhost:3000",
+      "https://19e28ad4-59b8-4219-a686-3b065d303788.lovableproject.com",
+      "https://id-preview--19e28ad4-59b8-4219-a686-3b065d303788.lovable.app",
+      "https://preview--ask-me-anything-ai-94.lovable.app",
+      "https://ask-me-anything-ai-94.lovable.app"
+    ]
+  },
+  "rateLimits": {
+    "default": {
+      "windowMs": 60000,
+      "maxCalls": 20
+    },
+    "perTool": {
+      "create_parking_card": {
+        "windowMs": 300000,
+        "maxCalls": 1
+      },
+      "submit_medical_device_aid_request": {
+        "windowMs": 300000,
+        "maxCalls": 1
+      },
+      "request_house_maid": {
+        "windowMs": 300000,
+        "maxCalls": 1
+      },
+      "request_home_checkup": {
+        "windowMs": 300000,
+        "maxCalls": 1
+      }
+    },
+    "cleanupIntervalMs": 60000
+  }
+}
