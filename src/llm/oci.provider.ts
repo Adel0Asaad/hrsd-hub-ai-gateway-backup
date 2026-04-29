@@ -266,8 +266,16 @@ export class OciProvider implements LlmProvider {
         // Use the text field directly from the response
         const assistantMessage = chatResponse.text;
 
+        // Map OCI tool calls to LlmResponse tool calls
+        const toolCalls = chatResponse.toolCalls?.map((tc, index) => ({
+            id: `call_${Date.now()}_${index}`, // Generate unique ID
+            name: tc.name,
+            arguments: tc.parameters
+        }));
+
         return {
             text: assistantMessage,
+            toolCalls,
             meta: {
                 finishReason: chatResponse.finishReason,
                 usage: {
