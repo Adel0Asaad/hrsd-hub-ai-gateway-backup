@@ -22,6 +22,16 @@ const registry: Record<string, ProviderFactory> = {
       circuitBreakerThreshold: config.llm.circuitBreakerThreshold,
       circuitBreakerResetMs: config.llm.circuitBreakerResetMs,
     }),
+  ollama: (cfg) =>
+    new OpenAIProvider({
+      apiKey: cfg.apiKey || 'ollama',
+      model: cfg.model,
+      baseURL: cfg.baseURL,
+      timeoutMs: config.llm.timeoutMs,
+      maxRetries: config.llm.maxRetries,
+      circuitBreakerThreshold: config.llm.circuitBreakerThreshold,
+      circuitBreakerResetMs: config.llm.circuitBreakerResetMs,
+    }),
   oci: () => new OciProvider(config),
   // Add more providers here when needed.
 };
@@ -40,9 +50,10 @@ export function getLlmProvider(): LlmProvider {
         `Registered: ${available}.`,
     );
   }
-  instance = factory(active);
+  instance = factory(active as ProviderConfig);
+  const modelInfo = 'model' in active ? active.model : 'N/A';
   logger.info(
-    { provider: instance.name, model: active.model },
+    { provider: instance.name, model: modelInfo },
     "llm_provider_initialised",
   );
   return instance;

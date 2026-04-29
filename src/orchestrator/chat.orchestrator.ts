@@ -165,6 +165,7 @@ export class ChatOrchestrator {
       context,
       message,
       history,
+      fileIds,
       signal,
     );
 
@@ -270,7 +271,7 @@ export class ChatOrchestrator {
       return;
     }
 
-    const prepared = await this.prepareTurn(context, message, history, signal);
+    const prepared = await this.prepareTurn(context, message, history, fileIds, signal);
     const { tools, mcpDegraded } = prepared;
     const messages = prepared.messages;
     const toolsUsed: ToolExecutionMeta[] = [];
@@ -437,6 +438,7 @@ export class ChatOrchestrator {
     context: ChatContextBundle,
     message: string,
     history: ChatMessage[],
+    fileIds: string[] | undefined,
     signal?: AbortSignal,
   ): Promise<{
     messages: ChatMessage[];
@@ -481,7 +483,15 @@ export class ChatOrchestrator {
       // the LLM stops planning around tools it no longer has.
       messages.push({ role: "system", content: MCP_DEGRADED_NOTICE.trim() });
     }
-    messages.push({ role: "user", content: message });
+    
+    // Append file information to the user message if files were uploaded
+    let userMessage = message;
+    if (fileIds && fileIds.length > 0) {
+      const fileInfo = `\n\n[📎 ${fileIds.length} file(s) uploaded and ready for submission]`;
+      userMessage = message + fileInfo;
+    }
+    
+    messages.push({ role: "user", content: userMessage });
 
     return { messages, tools, mcpDegraded };
   }

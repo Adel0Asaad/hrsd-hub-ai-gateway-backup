@@ -225,6 +225,7 @@ export class OciProvider implements LlmProvider {
             logger.info({ toolCount: request.tools.length }, 'Added tools to OCI request');
         }
 
+        logger.info({ ociRequest }, 'Full OCI request to LLM');
         return ociRequest;
     }
 

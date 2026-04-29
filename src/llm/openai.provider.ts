@@ -45,6 +45,7 @@ import { circuitBreakerState } from "../observability/metrics.js";
 export interface OpenAIProviderConfig {
   apiKey: string;
   model: string;
+  baseURL?: string;
   timeoutMs?: number;
   maxRetries?: number;
   circuitBreakerThreshold?: number;
@@ -60,7 +61,10 @@ export class OpenAIProvider implements LlmProvider {
   private readonly breaker: CircuitBreaker;
 
   constructor(cfg: OpenAIProviderConfig) {
-    this.client = new OpenAI({ apiKey: cfg.apiKey });
+    this.client = new OpenAI({ 
+      apiKey: cfg.apiKey,
+      ...(cfg.baseURL && { baseURL: cfg.baseURL })
+    });
     this.model = cfg.model;
     this.timeoutMs = cfg.timeoutMs ?? 30_000;
     this.maxRetries = cfg.maxRetries ?? 2;
@@ -90,15 +94,21 @@ export class OpenAIProvider implements LlmProvider {
       const signal = linkSignals(request.signal, timeoutSignal(this.timeoutMs));
       let completion;
       try {
+        const requestBody = {
+          model: this.model,
+          messages,
+          tools,
+          tool_choice: tools ? "auto" : undefined,
+        };
+        
+        logger.info({ requestBody }, 'Full request to LLM');
+        
         completion = await this.client.chat.completions.create(
-          {
-            model: this.model,
-            messages,
-            tools,
-            tool_choice: tools ? "auto" : undefined,
-          },
+          requestBody,
           { signal },
         );
+        
+        logger.info({ completion }, 'Received response from LLM');
       } catch (err) {
         if (isAbortError(err)) {
           // Client disconnect vs. deadline — caller sees abort; we map

@@ -26,6 +26,7 @@ const providerConfigSchema = z
   .object({
     apiKey: z.string().min(1, "apiKey cannot be empty"),
     model: z.string().min(1),
+    baseURL: z.string().url().optional(),
   })
   .catchall(z.unknown());
 

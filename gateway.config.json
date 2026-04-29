@@ -8,7 +8,7 @@
       },
       "ollama": {
         "apiKey": "ollama",
-        "model": "Qwen3:1.7b",
+        "model": "qwen3:4b-instruct",
         "baseURL": "http://localhost:11434/v1"
       },
       "gemini": {
@@ -28,7 +28,7 @@
           "rejectUnauthorized": false
         },
         "chat": {
-          "url": "https://apis.apps.ocp-preprod.hrsd.gov.sa/hrsd-dev/internal-services/v1/chat/completions",
+          "url": "https://apis.apps.ocp-preprod.hrsd.gov.sa/hrsd-dev/internal-services/v2/chat/completions",
           "compartmentId": "ocid1.compartment.oc1..aaaaaaaatpomtbq6pmgtcwkkqcy26riaryfd6t2xqbrsxzjas3q6eatnaebq",
           "servingType": "DEDICATED",
           "endpointId": "ocid1.generativeaiendpoint.oc1.me-riyadh-1.amaaaaaazwnzubqakxuunq46cppei25dd5ghogdpcozeqtsogdgosijkevra",
@@ -36,7 +36,7 @@
         }
       }
     },
-    "timeoutMs": 60000,
+    "timeoutMs": 120000,
     "maxRetries": 1
   },
   "mcp": {
@@ -56,7 +56,7 @@
   "server": {
     "port": 3002,
     "logLevel": "debug",
-    "requestTimeoutMs": 90000,
+    "requestTimeoutMs": 150000,
     "allowedOrigins": [
       "http://localhost:8080",
       "http://localhost:5173",
