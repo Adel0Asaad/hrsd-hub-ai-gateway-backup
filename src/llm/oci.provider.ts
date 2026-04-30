@@ -44,7 +44,7 @@ interface OciChatRequest {
         apiFormat: string;
         preambleOverride?: string;
         documents?: { title: string; snippet: string; website: string }[];
-        chatHistory?: { role: string; message: string }[];
+        chatHistory?: Array<{ role: string; message?: string; toolResults?: CohereToolResult[] }>;
         tools?: OciTool[];
         toolResults?: CohereToolResult[];
     };
@@ -170,7 +170,7 @@ export class OciProvider implements LlmProvider {
         const systemMessage = request.messages.find((m: ChatMessage) => m.role === 'system');
         
         // Extract tool results from the conversation if present
-        const toolResults = this.extractToolResults(request.messages);
+        const toolResults = this.extractToolResults(request.messages, request);
         
         // Get the last user message (only used if no tool results)
         const lastUserMessage = request.messages.at(-1)!;
@@ -227,71 +227,17 @@ export class OciProvider implements LlmProvider {
             logger.info({ toolResultsCount: toolResults.length }, 'Added tool results to OCI request');
         }
 
-        logger.info({ ociRequest }, 'Full OCI request to LLM');
         return ociRequest;
     }
 
     /**
-     * Extract tool results from conversation messages and match them with their
-     * original Cohere tool calls reconstructed from the assistant message.
+     * Extract tool results from previousResponse meta.
+     * OCI stores toolResults directly in meta.ociToolResults after orchestrator
+     * execution, so we just read them - https://docs.oracle.com/en-us/iaas/api/#/en/generative-ai-inference/20231130/datatypes/CohereToolMessageno message parsing needed.
      */
-    private extractToolResults(messages: ChatMessage[]): CohereToolResult[] {
-        const toolResults: CohereToolResult[] = [];
-        
-        // Find the most recent assistant message with tool calls
-        let lastAssistantMessage: ChatMessage | undefined;
-        for (let i = messages.length - 1; i >= 0; i--) {
-            if (messages[i].role === 'assistant' && messages[i].toolCalls) {
-                lastAssistantMessage = messages[i];
-                break;
-            }
-        }
-        
-        if (!lastAssistantMessage?.toolCalls) {
-            return toolResults;
-        }
-        
-        // Build a map of toolCallId to reconstructed CohereToolCall
-        const cohereCallsById = new Map<string, CohereToolCall>();
-        for (const toolCall of lastAssistantMessage.toolCalls) {
-            try {
-                const parameters = typeof toolCall.arguments === 'string'
-                    ? JSON.parse(toolCall.arguments)
-                    : toolCall.arguments;
-                
-                cohereCallsById.set(toolCall.id, {
-                    name: toolCall.name,
-                    parameters: parameters
-                });
-            } catch (error) {
-                logger.error({ error, toolCall }, 'Failed to parse tool call arguments');
-            }
-        }
-        
-        // Match tool result messages with their corresponding calls
-        for (const message of messages) {
-            if (message.role === 'tool' && message.toolCallId) {
-                const cohereCall = cohereCallsById.get(message.toolCallId);
-                
-                if (cohereCall) {
-                    // Parse the tool output content
-                    let outputData: any;
-                    try {
-                        outputData = JSON.parse(message.content);
-                    } catch {
-                        // If not JSON, treat as plain text
-                        outputData = { text: message.content };
-                    }
-                    
-                    toolResults.push({
-                        call: cohereCall,
-                        outputs: [outputData]
-                    });
-                }
-            }
-        }
-        
-        return toolResults;
+    private extractToolResults(messages: ChatMessage[], request: LlmRequest): CohereToolResult[] {
+        // Direct read from meta - orchestrator populates this
+        return (request.previousResponse?.meta?.ociToolResults as CohereToolResult[] | undefined) ?? [];
     }
 
     /**
@@ -360,7 +306,11 @@ export class OciProvider implements LlmProvider {
                         toolCalls: assistantToolCalls,
                     },
                     // Preserve OCI's chatHistory for reuse in subsequent rounds
-                    ociChatHistory: chatResponse.chatHistory
+                    ociChatHistory: chatResponse.chatHistory,
+                    // Store raw OCI toolCalls in native Cohere format for direct reuse
+                    ociToolCalls: chatResponse.toolCalls,
+                    // Will be populated by orchestrator after tool execution
+                    ociToolResults: []
                 }
             };
         }

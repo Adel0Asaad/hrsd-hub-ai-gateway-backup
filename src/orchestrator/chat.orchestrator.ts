@@ -222,8 +222,15 @@ export class ChatOrchestrator {
       // 5b. Tool calls. Append the assistant's tool-call message first.
       messages.push(this.assistantToolCallMessage(response));
 
+      // Initialize ociToolResults array for meta-based tool handling (OCI-specific)
+      if (response.meta?.ociToolCalls) {
+        if (!response.meta.ociToolResults) {
+          response.meta.ociToolResults = [];
+        }
+      }
+
       for (const toolCall of response.toolCalls) {
-        const { meta, cards } = await this.executeToolCall({
+        const { meta, cards, result } = await this.executeToolCall({
           toolCall,
           userId,
           allowed: new Set(context.tools),
@@ -235,6 +242,20 @@ export class ChatOrchestrator {
         });
         toolsUsed.push(meta);
         if (cards) capturedBlocks.push(cards);
+
+        // For OCI: Build toolResults in meta using raw Cohere DTOs
+        if (response.meta?.ociToolCalls && result !== undefined) {
+          // Find matching raw OCI toolCall by index (they're created in order)
+          const toolIndex = response.toolCalls.indexOf(toolCall);
+          const rawOciToolCall = (response.meta.ociToolCalls as any[])[toolIndex];
+          
+          if (rawOciToolCall) {
+            (response.meta.ociToolResults as any[]).push({
+              call: rawOciToolCall,
+              outputs: [result]
+            });
+          }
+        }
       }
       
       // Save this response for the next round so the provider can
@@ -376,9 +397,12 @@ export class ChatOrchestrator {
       // can show a "running …" chip.
       messages.push(assistantMessage);
 
+      // Initialize ociToolResults for streaming (though OCI doesn't stream, other providers might)
+      const streamOciToolResults: any[] = [];
+
       for (const toolCall of toolCalls) {
         yield { type: "tool_start", name: toolCall.name, id: toolCall.id };
-        const { meta, cards } = await this.executeToolCall({
+        const { meta, cards, result } = await this.executeToolCall({
           toolCall,
           userId,
           allowed,
@@ -390,6 +414,16 @@ export class ChatOrchestrator {
         });
         toolsUsed.push(meta);
         if (cards) capturedBlocks.push(cards);
+        
+        // Collect result for potential meta-based handling
+        if (result !== undefined) {
+          const toolIndex = toolCalls.indexOf(toolCall);
+          streamOciToolResults.push({
+            toolIndex,
+            result
+          });
+        }
+        
         yield {
           type: "tool_end",
           name: meta.name,
@@ -405,7 +439,10 @@ export class ChatOrchestrator {
       previousStreamResponse = {
         toolCalls: toolCalls,
         text: aggregated,
-        meta: { assistantMessage }
+        meta: { 
+          assistantMessage,
+          ociToolResults: streamOciToolResults.length > 0 ? streamOciToolResults : undefined
+        }
       };
     }
 
@@ -573,21 +610,22 @@ export class ChatOrchestrator {
     mcpDegraded: boolean;
     fileIds?: string[];
     signal?: AbortSignal;
-  }): Promise<{ meta: ToolExecutionMeta; cards?: CardsBlock }> {
+  }): Promise<{ meta: ToolExecutionMeta; cards?: CardsBlock; result?: any }> {
     const { toolCall, userId, allowed, renderByTool, messages, mcpDegraded, fileIds, signal } = args;
     const start = Date.now();
 
     // MCP is degraded — short-circuit every tool call. The assistant
     // has already been told it's text-only; this is belt-and-braces.
     if (mcpDegraded) {
+      const errorResult = {
+        error: "mcp_unavailable",
+        message:
+          "Backend tools are temporarily unavailable. Continue text-only and advise the user to retry in a moment.",
+      };
       messages.push({
         role: "tool",
         toolCallId: toolCall.id,
-        content: JSON.stringify({
-          error: "mcp_unavailable",
-          message:
-            "Backend tools are temporarily unavailable. Continue text-only and advise the user to retry in a moment.",
-        }),
+        content: JSON.stringify(errorResult),
       });
       return {
         meta: {
@@ -595,17 +633,19 @@ export class ChatOrchestrator {
           durationMs: Date.now() - start,
           isError: true,
         },
+        result: errorResult,
       };
     }
 
     // Guard 1: allowlist enforcement.
     if (!allowed.has(toolCall.name)) {
+      const errorResult = {
+        error: `Tool "${toolCall.name}" is not permitted for this user.`,
+      };
       messages.push({
         role: "tool",
         toolCallId: toolCall.id,
-        content: JSON.stringify({
-          error: `Tool "${toolCall.name}" is not permitted for this user.`,
-        }),
+        content: JSON.stringify(errorResult),
       });
       return {
         meta: {
@@ -613,6 +653,7 @@ export class ChatOrchestrator {
           durationMs: Date.now() - start,
           isError: true,
         },
+        result: errorResult,
       };
     }
 
@@ -633,20 +674,21 @@ export class ChatOrchestrator {
         },
         "rate_limit_blocked",
       );
+      const errorResult = {
+        error: "rate_limited",
+        tool: toolCall.name,
+        limit: decision.limit,
+        windowSeconds: windowSec,
+        retryAfterSeconds: retrySec,
+        message:
+          `This action was already performed recently for this user. ` +
+          `Tell the user it's been submitted and they can retry in ${retrySec}s ` +
+          `if they explicitly need another submission. Do not silently retry.`,
+      };
       messages.push({
         role: "tool",
         toolCallId: toolCall.id,
-        content: JSON.stringify({
-          error: "rate_limited",
-          tool: toolCall.name,
-          limit: decision.limit,
-          windowSeconds: windowSec,
-          retryAfterSeconds: retrySec,
-          message:
-            `This action was already performed recently for this user. ` +
-            `Tell the user it's been submitted and they can retry in ${retrySec}s ` +
-            `if they explicitly need another submission. Do not silently retry.`,
-        }),
+        content: JSON.stringify(errorResult),
       });
       return {
         meta: {
@@ -654,6 +696,7 @@ export class ChatOrchestrator {
           durationMs: Date.now() - start,
           isError: true,
         },
+        result: errorResult,
       };
     }
 
@@ -731,6 +774,10 @@ export class ChatOrchestrator {
       "cards_render_decision",
     );
 
+    // Prepare result data for meta-based tool handling (OCI)
+    const resultData = result.structured ?? 
+      (result.content ? (safeJsonParse(result.content) ?? { text: result.content }) : undefined);
+
     return {
       meta: {
         name: toolCall.name,
@@ -738,6 +785,7 @@ export class ChatOrchestrator {
         isError: result.isError,
       },
       cards,
+      result: resultData,
     };
   }
 
