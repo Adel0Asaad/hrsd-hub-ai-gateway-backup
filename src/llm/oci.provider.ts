@@ -175,39 +175,16 @@ export class OciProvider implements LlmProvider {
         // Get the last user message (only used if no tool results)
         const lastUserMessage = request.messages.at(-1)!;
         
-        // Filter chat history: exclude system messages, exclude the last user message (it goes in 'message'),
-        // and exclude empty messages. Also ensure alternating USER/ASSISTANT pattern.
-        const filteredMessages = request.messages
-            .slice(0, -1)  // Exclude last message (it's in the 'message' field)
-            .filter((m: ChatMessage) => {
-                // Only include USER and ASSISTANT roles
-                if (m.role !== 'user' && m.role !== 'assistant') {
-                    return false;
-                }
-                // Exclude empty messages
-                if (!m.content || m.content.trim() === '') {
-                    return false;
-                }
-                return true;
-            });
-
-        // Ensure alternating pattern by removing consecutive messages with the same role
-        const chatHistory: { role: string; message: string }[] = [];
-        let lastRole: string | null = null;
+        // OPTIMIZATION: If previousResponse contains ociChatHistory, reuse it directly
+        // instead of re-parsing messages. This is the entire point of the refactoring -
+        // OCI already gave us the perfect chatHistory in the last response.
+        let chatHistory: { role: string; message?: string; toolResults?: CohereToolResult[] }[] = [];
         
-        for (const m of filteredMessages) {
-            // Map assistant to CHATBOT (Cohere's terminology)
-            const role = m.role === 'assistant' ? 'CHATBOT' : m.role.toUpperCase();
-            // Skip if same role as previous message (to maintain alternation)
-            if (role === lastRole) {
-                continue;
-            }
-            chatHistory.push({
-                role: role,
-                message: m.content,
-            });
-            lastRole = role;
-        }
+        if (request.previousResponse?.meta?.ociChatHistory) {
+            // Direct copy - no parsing, no rebuilding, just reuse OCI's exact data
+            chatHistory = request.previousResponse.meta.ociChatHistory as { role: string; message?: string; toolResults?: CohereToolResult[] }[];
+            logger.info({ historyCount: chatHistory.length }, 'Reusing OCI chatHistory from previous response');
+        } 
 
         const ociRequest: OciChatRequest = {
             compartmentId: this.chatConfig.compartmentId,
@@ -381,7 +358,9 @@ export class OciProvider implements LlmProvider {
                         role: "assistant" as const,
                         content: assistantMessage ?? "",
                         toolCalls: assistantToolCalls,
-                    }
+                    },
+                    // Preserve OCI's chatHistory for reuse in subsequent rounds
+                    ociChatHistory: chatResponse.chatHistory
                 }
             };
         }
@@ -394,7 +373,9 @@ export class OciProvider implements LlmProvider {
                     completionTokens: Number.parseInt(chatResponse.usage.completionTokens, 10),
                     promptTokens: Number.parseInt(chatResponse.usage.promptTokens, 10),
                     totalTokens: Number.parseInt(chatResponse.usage.totalTokens, 10),
-                }
+                },
+                // Preserve OCI's chatHistory for reuse in subsequent rounds
+                ociChatHistory: chatResponse.chatHistory
             }
         };
     }

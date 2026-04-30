@@ -41,7 +41,7 @@ export function createChatRouter(orchestrator: ChatOrchestrator): Router {
   router.post(
     "/",
     asyncHandler(async (req: Request, res: Response) => {
-      const { message, conversationId, history, userId } = parseBody(req);
+      const { message, conversationId, history, userId, cohereChatHistory } = parseBody(req);
 
       // Tie caller-lifecycle to a cancellation signal.
       //
@@ -67,6 +67,7 @@ export function createChatRouter(orchestrator: ChatOrchestrator): Router {
           message,
           userId,
           history,
+          cohereChatHistory,
           signal: controller.signal,
         });
 
@@ -75,6 +76,7 @@ export function createChatRouter(orchestrator: ChatOrchestrator): Router {
           text: result.text,
           history: result.history,
           toolsUsed: result.toolsUsed,
+          cohereChatHistory: result.cohereChatHistory,
         });
       } finally {
         res.removeListener("close", onResClose);
@@ -85,7 +87,7 @@ export function createChatRouter(orchestrator: ChatOrchestrator): Router {
   router.post(
     "/stream",
     asyncHandler(async (req: Request, res: Response) => {
-      const { message, conversationId, history, userId } = parseBody(req);
+      const { message, conversationId, history, userId, cohereChatHistory } = parseBody(req);
 
       // --- SSE preamble ---
       res.writeHead(200, {
@@ -137,6 +139,7 @@ export function createChatRouter(orchestrator: ChatOrchestrator): Router {
           message,
           userId,
           history,
+          cohereChatHistory,
           signal: controller.signal,
         })) {
           if (ev.type === "delta") {
@@ -168,6 +171,7 @@ export function createChatRouter(orchestrator: ChatOrchestrator): Router {
               text: ev.text,
               history: ev.history,
               toolsUsed: ev.toolsUsed,
+              cohereChatHistory: ev.cohereChatHistory,
             });
           } else if (ev.type === "error") {
             const traceId = (req as Request & { traceId?: string }).traceId ?? "";
@@ -208,12 +212,14 @@ function parseBody(req: Request): {
   userId: string;
   conversationId?: string;
   history?: ChatMessage[];
+  cohereChatHistory?: Array<{ role: string; message?: string; toolResults?: any[] }>;
 } {
-  const { message, conversationId, history, userId } = req.body as {
+  const { message, conversationId, history, userId, cohereChatHistory } = req.body as {
     message?: string;
     conversationId?: string;
     history?: ChatMessage[];
     userId?: string;
+    cohereChatHistory?: Array<{ role: string; message?: string; toolResults?: any[] }>;
   };
 
   if (!message || typeof message !== "string" || message.trim().length === 0) {
@@ -232,7 +238,10 @@ function parseBody(req: Request): {
       }
     }
   }
-  return { message: message.trim(), userId: userId.trim(), conversationId, history };
+  if (cohereChatHistory !== undefined && !Array.isArray(cohereChatHistory)) {
+    throw new ValidationError('"cohereChatHistory" must be an array.');
+  }
+  return { message: message.trim(), userId: userId.trim(), conversationId, history, cohereChatHistory };
 }
 
 function asyncHandler(

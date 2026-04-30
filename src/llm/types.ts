@@ -93,6 +93,12 @@ export interface LlmRequest {
   meta?: Record<string, unknown>;
   /** Aborts the provider request when the caller disconnects. */
   signal?: AbortSignal;
+  /** 
+   * Previous LLM response from the last round. 
+   * Providers can extract provider-specific state (like OCI's chatHistory) 
+   * from meta and reuse it directly instead of re-parsing messages.
+   */
+  previousResponse?: LlmResponse;
 }
 
 /* ------------------------------------------------------------------ */

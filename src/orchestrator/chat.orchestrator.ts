@@ -123,6 +123,8 @@ export interface ChatRequest {
    * a dropped client releases sdp/mcp/llm work immediately.
    */
   signal?: AbortSignal;
+
+  cohereChatHistory?: { role: string; message?: string; toolResults?: any[] }[];
 }
 
 export interface ToolExecutionMeta {
@@ -138,6 +140,11 @@ export interface ChatResponse {
   history: ChatMessage[];
   /** Metadata about tool usage for observability. */
   toolsUsed: ToolExecutionMeta[];
+  /** 
+   * Cohere/OCI-specific chat history in provider's native format.
+   * Useful for debugging and UI visualization of the actual conversation state.
+   */
+  cohereChatHistory?: Array<{ role: string; message?: string; toolResults?: any[] }>;
 }
 
 /* ------------------------------------------------------------------ */
@@ -157,7 +164,7 @@ export class ChatOrchestrator {
   /* ================================================================== */
 
   async chat(request: ChatRequest): Promise<ChatResponse> {
-    const { message, userId, signal, fileIds } = this.validate(request);
+    const { message, userId, signal, fileIds, cohereChatHistory } = this.validate(request);
     const history = request.history ?? [];
 
     const context = await this.fetchContext(userId, signal);
@@ -181,13 +188,21 @@ export class ChatOrchestrator {
     // so the frontend can route on `kind`.
     const capturedBlocks: CardsBlock[] = [];
     let round = 0;
+    let previousResponse: LlmResponse | undefined = cohereChatHistory 
+      ? { meta: { ociChatHistory: cohereChatHistory } } 
+      : undefined;
 
     while (round < MAX_TOOL_ROUNDS) {
       round++;
 
       let response: LlmResponse;
       try {
-        response = await this.llm.chat({ messages, tools, signal });
+        response = await this.llm.chat({ 
+          messages, 
+          tools, 
+          signal,
+          previousResponse 
+        });
       } catch (err) {
         throw this.mapLlmError(err);
       }
@@ -200,7 +215,8 @@ export class ChatOrchestrator {
       ) {
         const finalText = appendCardsBlocks(response.text ?? "", capturedBlocks);
         messages.push({ role: "assistant", content: finalText });
-        return { text: finalText, history: messages, toolsUsed };
+        const cohereChatHistory = response.meta?.ociChatHistory as Array<{ role: string; message?: string; toolResults?: any[] }> | undefined;
+        return { text: finalText, history: messages, toolsUsed, cohereChatHistory };
       }
 
       // 5b. Tool calls. Append the assistant's tool-call message first.
@@ -220,6 +236,11 @@ export class ChatOrchestrator {
         toolsUsed.push(meta);
         if (cards) capturedBlocks.push(cards);
       }
+      
+      // Save this response for the next round so the provider can
+      // reuse provider-specific state (like OCI's chatHistory) instead
+      // of re-parsing messages.
+      previousResponse = response;
     }
 
     throw new MaxRoundsExceededError(MAX_TOOL_ROUNDS);
@@ -248,7 +269,7 @@ export class ChatOrchestrator {
   async *stream(
     request: ChatRequest,
   ): AsyncGenerator<OrchestratorStreamEvent, void, unknown> {
-    const { message, userId, signal, fileIds } = this.validate(request);
+    const { message, userId, signal, fileIds, cohereChatHistory } = this.validate(request);
     const history = request.history ?? [];
 
     // If the provider doesn't support streaming, degrade to non-stream
@@ -256,7 +277,7 @@ export class ChatOrchestrator {
     if (!this.llm.stream) {
       try {
         const r = await this.chat({ message, userId, history, fileIds, signal });
-        yield { type: "final", text: r.text, history: r.history, toolsUsed: r.toolsUsed };
+        yield { type: "final", text: r.text, history: r.history, toolsUsed: r.toolsUsed, cohereChatHistory: r.cohereChatHistory };
       } catch (err) {
         yield { type: "error", error: this.toAppError(err) };
       }
@@ -281,6 +302,9 @@ export class ChatOrchestrator {
     // rounds to append to the final text.
     const capturedBlocks: CardsBlock[] = [];
     let round = 0;
+    let previousStreamResponse: LlmResponse | undefined = cohereChatHistory 
+      ? { meta: { ociChatHistory: cohereChatHistory } } 
+      : undefined;
 
     while (round < MAX_TOOL_ROUNDS) {
       round++;
@@ -291,7 +315,12 @@ export class ChatOrchestrator {
       let streamError: Error | null = null;
 
       try {
-        for await (const ev of this.llm.stream({ messages, tools, signal })) {
+        for await (const ev of this.llm.stream({ 
+          messages, 
+          tools, 
+          signal,
+          previousResponse: previousStreamResponse 
+        })) {
           // Bail early if the caller disconnected.
           if (signal?.aborted) {
             streamError = new Error("client_aborted");
@@ -336,7 +365,9 @@ export class ChatOrchestrator {
         const suffix = finalText.slice(aggregated.length);
         if (suffix.length > 0) yield { type: "delta", text: suffix };
         messages.push({ role: "assistant", content: finalText });
-        yield { type: "final", text: finalText, history: messages, toolsUsed };
+        // Extract Cohere chat history from previousStreamResponse if available
+        const cohereChatHistory = previousStreamResponse?.meta?.ociChatHistory as Array<{ role: string; message: string }> | undefined;
+        yield { type: "final", text: finalText, history: messages, toolsUsed, cohereChatHistory };
         return;
       }
 
@@ -367,6 +398,15 @@ export class ChatOrchestrator {
           isError: meta.isError,
         };
       }
+      
+      // Construct a minimal response for the next round.
+      // Note: For OCI (no streaming), this won't be used since it falls back to chat().
+      // For providers with native streaming, this allows reuse of provider-specific state.
+      previousStreamResponse = {
+        toolCalls: toolCalls,
+        text: aggregated,
+        meta: { assistantMessage }
+      };
     }
 
     yield { type: "error", error: new MaxRoundsExceededError(MAX_TOOL_ROUNDS) };
@@ -381,8 +421,9 @@ export class ChatOrchestrator {
     userId: string;
     fileIds?: string[];
     signal?: AbortSignal;
+    cohereChatHistory?: Array<{ role: string; message?: string; toolResults?: any[] }>;
   } {
-    const { message, userId, fileIds, signal } = request;
+    const { message, userId, fileIds, signal, cohereChatHistory } = request;
     if (!userId || typeof userId !== "string" || userId.trim() === "") {
       // Distinct code from INVALID_INPUT so the frontend can redirect
       // to the login flow rather than show a generic error.
@@ -395,7 +436,7 @@ export class ChatOrchestrator {
     if (!message || typeof message !== "string" || message.trim() === "") {
       throw new ValidationError('"message" is required and must be non-empty.');
     }
-    return { message: message.trim(), userId: userId.trim(), fileIds, signal };
+    return { message: message.trim(), userId: userId.trim(), fileIds, signal, cohereChatHistory };
   }
 
   /**
@@ -799,6 +840,7 @@ export type OrchestratorStreamEvent =
       text: string;
       history: ChatMessage[];
       toolsUsed: ToolExecutionMeta[];
+      cohereChatHistory?: Array<{ role: string; message?: string; toolResults?: any[] }>;
     }
   | { type: "error"; error: AppError };
 
