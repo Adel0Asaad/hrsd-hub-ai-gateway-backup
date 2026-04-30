@@ -23,6 +23,16 @@ interface OciTool {
     }>;
 }
 
+interface CohereToolCall {
+    name: string;
+    parameters: Record<string, unknown>;
+}
+
+interface CohereToolResult {
+    call: CohereToolCall;
+    outputs: Array<Record<string, unknown>>;
+}
+
 interface OciChatRequest {
     compartmentId: string;
     servingMode: {
@@ -30,12 +40,13 @@ interface OciChatRequest {
         endpointId: string;
     };
     chatRequest: {
-        message: string;
+        message?: string;
         apiFormat: string;
         preambleOverride?: string;
         documents?: { title: string; snippet: string; website: string }[];
         chatHistory?: { role: string; message: string }[];
         tools?: OciTool[];
+        toolResults?: CohereToolResult[];
     };
 }
 
@@ -45,10 +56,7 @@ interface OciChatResponse {
             text: string;
             chatHistory: { role: string; message: string }[];
             finishReason: string;
-            toolCalls?: {
-                name: string;
-                parameters: Record<string, unknown>;
-            }[];
+            toolCalls?: CohereToolCall[];
             usage: {
                 completionTokens: string;
                 promptTokens: string;
@@ -158,10 +166,14 @@ export class OciProvider implements LlmProvider {
     }
 
     private createOciRequest(request: LlmRequest): OciChatRequest {
-        const lastUserMessage = request.messages.at(-1)!;
-        
         // Extract system message (preamble) if present
         const systemMessage = request.messages.find((m: ChatMessage) => m.role === 'system');
+        
+        // Extract tool results from the conversation if present
+        const toolResults = this.extractToolResults(request.messages);
+        
+        // Get the last user message (only used if no tool results)
+        const lastUserMessage = request.messages.at(-1)!;
         
         // Filter chat history: exclude system messages, exclude the last user message (it goes in 'message'),
         // and exclude empty messages. Also ensure alternating USER/ASSISTANT pattern.
@@ -204,10 +216,17 @@ export class OciProvider implements LlmProvider {
                 endpointId: this.chatConfig.endpointId,
             },
             chatRequest: {
-                message: lastUserMessage.content,
                 apiFormat: this.chatConfig.apiFormat,
             },
         };
+
+        // When tool results exist, message should be empty (tool results represent the continuation)
+        // When no tool results, use the actual user message
+        if (toolResults.length > 0) {
+            ociRequest.chatRequest.message = '';
+        } else {
+            ociRequest.chatRequest.message = lastUserMessage.content ?? '';
+        }
 
         // Add system prompt as preambleOverride if present
         if (systemMessage?.content) {
@@ -225,8 +244,77 @@ export class OciProvider implements LlmProvider {
             logger.info({ toolCount: request.tools.length }, 'Added tools to OCI request');
         }
 
+        // Add tool results if present
+        if (toolResults.length > 0) {
+            ociRequest.chatRequest.toolResults = toolResults;
+            logger.info({ toolResultsCount: toolResults.length }, 'Added tool results to OCI request');
+        }
+
         logger.info({ ociRequest }, 'Full OCI request to LLM');
         return ociRequest;
+    }
+
+    /**
+     * Extract tool results from conversation messages and match them with their
+     * original Cohere tool calls reconstructed from the assistant message.
+     */
+    private extractToolResults(messages: ChatMessage[]): CohereToolResult[] {
+        const toolResults: CohereToolResult[] = [];
+        
+        // Find the most recent assistant message with tool calls
+        let lastAssistantMessage: ChatMessage | undefined;
+        for (let i = messages.length - 1; i >= 0; i--) {
+            if (messages[i].role === 'assistant' && messages[i].toolCalls) {
+                lastAssistantMessage = messages[i];
+                break;
+            }
+        }
+        
+        if (!lastAssistantMessage?.toolCalls) {
+            return toolResults;
+        }
+        
+        // Build a map of toolCallId to reconstructed CohereToolCall
+        const cohereCallsById = new Map<string, CohereToolCall>();
+        for (const toolCall of lastAssistantMessage.toolCalls) {
+            try {
+                const parameters = typeof toolCall.arguments === 'string'
+                    ? JSON.parse(toolCall.arguments)
+                    : toolCall.arguments;
+                
+                cohereCallsById.set(toolCall.id, {
+                    name: toolCall.name,
+                    parameters: parameters
+                });
+            } catch (error) {
+                logger.error({ error, toolCall }, 'Failed to parse tool call arguments');
+            }
+        }
+        
+        // Match tool result messages with their corresponding calls
+        for (const message of messages) {
+            if (message.role === 'tool' && message.toolCallId) {
+                const cohereCall = cohereCallsById.get(message.toolCallId);
+                
+                if (cohereCall) {
+                    // Parse the tool output content
+                    let outputData: any;
+                    try {
+                        outputData = JSON.parse(message.content);
+                    } catch {
+                        // If not JSON, treat as plain text
+                        outputData = { text: message.content };
+                    }
+                    
+                    toolResults.push({
+                        call: cohereCall,
+                        outputs: [outputData]
+                    });
+                }
+            }
+        }
+        
+        return toolResults;
     }
 
     /**
@@ -266,16 +354,40 @@ export class OciProvider implements LlmProvider {
         // Use the text field directly from the response
         const assistantMessage = chatResponse.text;
 
-        // Map OCI tool calls to LlmResponse tool calls
-        const toolCalls = chatResponse.toolCalls?.map((tc, index) => ({
-            id: `call_${Date.now()}_${index}`, // Generate unique ID
-            name: tc.name,
-            arguments: tc.parameters
-        }));
+        // If there are tool calls, build both formats
+        if (chatResponse.toolCalls && chatResponse.toolCalls.length > 0) {
+            const toolCalls = chatResponse.toolCalls.map((tc, index) => ({
+                id: `call_${Date.now()}_${index}`,
+                name: tc.name,
+                arguments: tc.parameters
+            }));
+
+            const assistantToolCalls = chatResponse.toolCalls.map((tc, index) => ({
+                id: `call_${Date.now()}_${index}`,
+                name: tc.name,
+                arguments: JSON.stringify(tc.parameters)
+            }));
+
+            return {
+                toolCalls,
+                meta: {
+                    finishReason: chatResponse.finishReason,
+                    usage: {
+                        completionTokens: Number.parseInt(chatResponse.usage.completionTokens, 10),
+                        promptTokens: Number.parseInt(chatResponse.usage.promptTokens, 10),
+                        totalTokens: Number.parseInt(chatResponse.usage.totalTokens, 10),
+                    },
+                    assistantMessage: {
+                        role: "assistant" as const,
+                        content: assistantMessage ?? "",
+                        toolCalls: assistantToolCalls,
+                    }
+                }
+            };
+        }
 
         return {
             text: assistantMessage,
-            toolCalls,
             meta: {
                 finishReason: chatResponse.finishReason,
                 usage: {
